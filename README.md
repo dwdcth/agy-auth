@@ -13,6 +13,13 @@
 npm install -g agy-auth
 ```
 
+支持的平台：macOS x64 / ARM64、Windows x64、Linux x64 / ARM64（aarch64，glibc）。
+npm 会自动选择当前平台和架构对应的预编译包。
+Linux ARM64 支持将在包含此改动的新版本发布后提供；不适用于 Android / Termux 或 Alpine / musl。
+Linux 切换系统凭据需要安装 `secret-tool`（Debian/Ubuntu 包名为 `libsecret-tools`），并运行可用的 Secret Service。
+
+GitHub Release 同时提供 `agy-auth-linux-aarch64.tar.gz`，解压后可直接运行。
+
 或者使用 `npx` 临时免安装执行：
 
 ```bash
@@ -41,6 +48,10 @@ npx agy-auth list
   ```bash
   agy-auth switch <account_email_or_id> # 或者 agy-auth use <email_or_id>
   ```
+  切换时会同步系统凭据及 `~/.gemini/google_accounts.json`：更新 `active`，
+  将原账号加入 `old`，移除目标账号的历史记录并去重，保留其他字段。
+  缓存文件使用原子替换写入（Unix 权限 `0600`）；不存在时自动创建，格式损坏时不会覆盖。
+  两项同步成功后才更新本工具的当前账号；若系统凭据已写入但缓存同步失败，会明确提示重试。
 
 * **查看当前激活的账号详情**：
   ```bash

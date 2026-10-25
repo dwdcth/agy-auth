@@ -18,7 +18,11 @@
     "@ccvibe/agy-auth-darwin-x64": "^1.0.6",
     "@ccvibe/agy-auth-darwin-arm64": "^1.0.6",
     "@ccvibe/agy-auth-linux-x64": "^1.0.6",
+    "@ccvibe/agy-auth-linux-arm64": "^1.0.6",
     "@ccvibe/agy-auth-win32-x64": "^1.0.6"
+  },
+  "scripts": {
+    "test": "node scripts/test-launcher.cjs"
   },
   "engines": {
     "node": ">=14"

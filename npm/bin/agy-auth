@@ -16,6 +16,8 @@ if (platform === 'darwin' && arch === 'x64') {
     packageName = '@ccvibe/agy-auth-darwin-arm64';
 } else if (platform === 'linux' && arch === 'x64') {
     packageName = '@ccvibe/agy-auth-linux-x64';
+} else if (platform === 'linux' && arch === 'arm64') {
+    packageName = '@ccvibe/agy-auth-linux-arm64';
 } else if (platform === 'win32' && arch === 'x64') {
     packageName = '@ccvibe/agy-auth-win32-x64';
     binaryName = 'agy-auth.exe';

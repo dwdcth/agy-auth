@@ -5,6 +5,7 @@ mod storage;
 mod ide_db;
 mod protobuf;
 mod import;
+mod google_accounts;
 
 use clap::{Parser, Subcommand};
 use models::{Account, TokenData};
@@ -458,14 +459,28 @@ async fn switch_to_account_object(target: &Account) -> anyhow::Result<()> {
         account.token = fresh_token;
     }
 
-    // Set current active account in cockpit registry
-    storage::set_current_account_id(&account.id).map_err(|e| anyhow::anyhow!(e))?;
+    // Persist refreshed credentials before changing the client's active identity.
     account.update_last_used();
     storage::save_account(&account).map_err(|e| anyhow::anyhow!(e))?;
 
     // Inject system credentials (Keychain / Credential Manager / Secret Service)
     credential::write_antigravity_system_credential(&account)
         .map_err(|e| anyhow::anyhow!("Failed to write system credentials: {}", e))?;
+
+    google_accounts::sync_active_account(&account.email).map_err(|e| {
+        anyhow::anyhow!(
+            "System credentials were updated, but google_accounts.json synchronization failed: {:#}. Retry switching the account.",
+            e
+        )
+    })?;
+
+    // Only mark the account active after both client credential stores are synced.
+    storage::set_current_account_id(&account.id).map_err(|e| {
+        anyhow::anyhow!(
+            "Client credentials and google_accounts.json were updated, but the local active account could not be saved: {}. Retry switching the account.",
+            e
+        )
+    })?;
 
     // Optionally inject into the Antigravity IDE SQLite profile if it exists
     if let Some(db_path) = ide_db::get_default_ide_db_path() {
