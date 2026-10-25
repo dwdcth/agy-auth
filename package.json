@@ -1,6 +1,6 @@
 {
   "name": "agy-auth",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "AGY CLI Multi-Account Management Tool",
   "main": "npm/bin/agy-auth",
   "bin": {
@@ -15,11 +15,11 @@
     "url": "https://github.com/ccvibe/agy-auth/issues"
   },
   "optionalDependencies": {
-    "@ccvibe/agy-auth-darwin-x64": "^1.0.6",
-    "@ccvibe/agy-auth-darwin-arm64": "^1.0.6",
-    "@ccvibe/agy-auth-linux-x64": "^1.0.6",
-    "@ccvibe/agy-auth-linux-arm64": "^1.0.6",
-    "@ccvibe/agy-auth-win32-x64": "^1.0.6"
+    "@ccvibe/agy-auth-darwin-x64": "^1.0.7",
+    "@ccvibe/agy-auth-darwin-arm64": "^1.0.7",
+    "@ccvibe/agy-auth-linux-x64": "^1.0.7",
+    "@ccvibe/agy-auth-linux-arm64": "^1.0.7",
+    "@ccvibe/agy-auth-win32-x64": "^1.0.7"
   },
   "scripts": {
     "test": "node scripts/test-launcher.cjs"
