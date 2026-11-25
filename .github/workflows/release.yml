@@ -76,9 +76,11 @@ jobs:
 
       - name: Install Zig
         if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'loongarch64-unknown-linux-gnu'
-        uses: mlugg/setup-zig@v1
-        with:
-          version: 0.17.0
+        run: |
+          curl -fsSL https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz -o /tmp/zig.tar.xz
+          mkdir -p /opt/zig
+          tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
+          echo "/opt/zig" >> "$GITHUB_PATH"
 
       - name: Install cargo-zigbuild
         if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'loongarch64-unknown-linux-gnu'
