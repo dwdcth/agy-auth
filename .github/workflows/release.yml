@@ -74,10 +74,19 @@ jobs:
         with:
           target: ${{ matrix.target }}
 
-      - name: Install Zig
+      - name: Cache Zig
         if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'loongarch64-unknown-linux-gnu'
+        id: zig-cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/zig
+          key: zig-0.17.0-x86_64-linux
+
+      - name: Install Zig
+        if: matrix.os == 'ubuntu-latest'
         run: |
-          curl -fsSL https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz -o /tmp/zig.tar.xz
+          curl -fL --retry 5 --retry-all-errors --retry-delay 10 --connect-timeout 30 -C - \
+            https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz -o /tmp/zig.tar.xz
           mkdir -p /opt/zig
           tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
           echo "/opt/zig" >> "$GITHUB_PATH"
