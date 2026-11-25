@@ -218,22 +218,27 @@ fn read_antigravity_system_credential_secret() -> Result<Option<String>, String>
     {
         use std::process::Command;
 
-        let output = Command::new("secret-tool")
+        let output = match Command::new("secret-tool")
             .args(["lookup", "service", "gemini", "username", "antigravity"])
             .output()
-            .map_err(|e| format!("Failed to run secret-tool: {}", e))?;
+        {
+            Ok(output) => output,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // secret-tool is not installed; the AGY CLI token file is the storage.
+                return read_antigravity_cli_token_file();
+            }
+            Err(e) => return Err(format!("Failed to run secret-tool: {}", e)),
+        };
 
-        if !output.status.success() {
-            // Not found is common when nothing is stored
-            return Ok(None);
+        if output.status.success() {
+            let secret = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !secret.is_empty() {
+                return Ok(Some(secret));
+            }
         }
 
-        let secret = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if secret.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(secret))
-        }
+        // Secret Service returned nothing usable; fall back to the AGY CLI token file.
+        read_antigravity_cli_token_file()
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
@@ -378,37 +383,172 @@ pub fn write_antigravity_system_credential(account: &Account) -> Result<(), Stri
 
     #[cfg(target_os = "linux")]
     {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
+        use colored::Colorize;
 
-        let mut child = Command::new("secret-tool")
-            .args([
-                "store",
-                "--label=gemini",
-                "service",
-                "gemini",
-                "username",
-                "antigravity",
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Failed to spawn secret-tool: {}", e))?;
+        // The AGY CLI reads this file directly when no Secret Service is available
+        // (headless Linux), so always keep it in sync with the active account.
+        write_antigravity_cli_token_file(account)?;
 
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(payload_json.as_bytes())
-                .map_err(|e| format!("Failed to write to secret-tool: {}", e))?;
+        if let Err(e) = write_antigravity_credential_via_secret_tool(&payload_json) {
+            eprintln!(
+                "{} Secret Service unavailable ({}); only the AGY CLI token file at {} was updated. Install libsecret-tools and gnome-keyring for native keyring storage.",
+                "Warning:".yellow().bold(),
+                e,
+                antigravity_cli_token_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| "<unknown>".to_string())
+            );
         }
+    }
 
-        let output = child
-            .wait_with_output()
-            .map_err(|e| format!("Failed to wait for secret-tool: {}", e))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("secret-tool write failed: {}", stderr.trim()));
+    Ok(())
+}
+
+/// Location of the AGY CLI's own file-based credential fallback on Linux.
+#[cfg(target_os = "linux")]
+fn antigravity_cli_token_path() -> Result<std::path::PathBuf, String> {
+    let home = dirs::home_dir().ok_or("Unable to get home directory")?;
+    Ok(home
+        .join(".gemini")
+        .join("antigravity-cli")
+        .join("antigravity-oauth-token"))
+}
+
+#[cfg(target_os = "linux")]
+fn read_antigravity_cli_token_file() -> Result<Option<String>, String> {
+    let path = antigravity_cli_token_path()?;
+    match std::fs::read_to_string(&path) {
+        Ok(content) => {
+            let trimmed = content.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
         }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("Failed to read AGY CLI token file: {}", e)),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn extract_id_token_email(id_token: Option<&str>) -> Option<String> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+
+    let payload_b64 = id_token?.trim().split('.').nth(1)?;
+    let decoded = URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload_b64))
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    claims
+        .get("email")?
+        .as_str()
+        .map(str::trim)
+        .filter(|email| !email.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+/// Payload format written by the AGY CLI itself to `antigravity-oauth-token`.
+#[cfg(target_os = "linux")]
+#[derive(serde::Serialize)]
+struct AntigravityCliTokenFile {
+    token: AntigravityCliTokenFileToken,
+    auth_method: String,
+    id_token_email: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(serde::Serialize)]
+struct AntigravityCliTokenFileToken {
+    access_token: String,
+    token_type: String,
+    refresh_token: String,
+    expiry: String,
+    expires_in: i64,
+}
+
+#[cfg(target_os = "linux")]
+fn write_antigravity_cli_token_file(account: &Account) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    let expiry = chrono::DateTime::from_timestamp(account.token.expiry_timestamp, 0)
+        .unwrap_or_else(chrono::Utc::now);
+    let expiry_local = chrono::DateTime::<chrono::Local>::from(expiry)
+        .to_rfc3339_opts(chrono::SecondsFormat::Micros, false);
+    let expires_in = (account.token.expiry_timestamp - chrono::Utc::now().timestamp()).max(0);
+
+    let id_token_email = extract_id_token_email(account.token.id_token.as_deref())
+        .unwrap_or_else(|| account.email.clone());
+
+    let payload = serde_json::to_string(&AntigravityCliTokenFile {
+        token: AntigravityCliTokenFileToken {
+            access_token: account.token.access_token.clone(),
+            token_type: account.token.token_type.clone(),
+            refresh_token: account.token.refresh_token.clone(),
+            expiry: expiry_local,
+            expires_in,
+        },
+        auth_method: "consumer".to_string(),
+        id_token_email,
+    })
+    .map_err(|e| format!("Failed to serialize AGY CLI token file: {}", e))?;
+
+    let path = antigravity_cli_token_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!("Failed to create AGY CLI token directory: {}", e)
+        })?;
+        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .map_err(|e| format!("Failed to create AGY CLI token file: {}", e))?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("Failed to restrict AGY CLI token permissions: {}", e))?;
+    file.write_all(payload.as_bytes())
+        .map_err(|e| format!("Failed to write AGY CLI token file: {}", e))?;
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn write_antigravity_credential_via_secret_tool(payload_json: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new("secret-tool")
+        .args([
+            "store",
+            "--label=gemini",
+            "service",
+            "gemini",
+            "username",
+            "antigravity",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to spawn secret-tool: {}", e))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(payload_json.as_bytes())
+            .map_err(|e| format!("failed to write to secret-tool: {}", e))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("failed to wait for secret-tool: {}", e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("secret-tool write failed: {}", stderr.trim()));
     }
 
     Ok(())
