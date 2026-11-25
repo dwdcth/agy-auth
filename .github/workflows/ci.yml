@@ -43,6 +43,8 @@ jobs:
 
       - name: Install Zig
         uses: mlugg/setup-zig@v1
+        with:
+          version: 0.17.0
 
       - name: Install cargo-zigbuild
         uses: taiki-e/install-action@v2
