@@ -6,25 +6,37 @@
 
 ## 1. 安装方法 
 
-其它用户只需在安装了 Node.js / npm 的任何电脑上直接运行即可：
+从 [GitHub Releases](https://github.com/dwdcth/agy-auth/releases) 下载对应平台的压缩包，解压后将二进制放入 `PATH` 即可：
+
+| 平台 | 资产文件 |
+| --- | --- |
+| Linux x64 | `agy-auth-linux-x86_64.tar.gz` |
+| Linux ARM64 (aarch64) | `agy-auth-linux-aarch64.tar.gz` |
+| Linux LoongArch64 | `agy-auth-linux-loongarch64.tar.gz` |
+| macOS x64 (Intel) | `agy-auth-macos-x86_64.tar.gz` |
+| macOS ARM64 (Apple Silicon) | `agy-auth-macos-aarch64.tar.gz` |
+| Windows x64 | `agy-auth-windows-x86_64.zip` |
 
 ```bash
-# 全局安装，支持 macOS、Windows、Linux
-npm install -g agy-auth
+# 示例：Linux x64
+curl -LO https://github.com/dwdcth/agy-auth/releases/latest/download/agy-auth-linux-x86_64.tar.gz
+tar -xzf agy-auth-linux-x86_64.tar.gz
+install -m 755 agy-auth-linux-x86_64 ~/.local/bin/agy-auth
 ```
 
-支持的平台：macOS x64 / ARM64、Windows x64、Linux x64 / ARM64（aarch64，glibc）。
-npm 会自动选择当前平台和架构对应的预编译包。
-Linux ARM64 支持将在包含此改动的新版本发布后提供；不适用于 Android / Termux 或 Alpine / musl。
-Linux 切换系统凭据需要安装 `secret-tool`（Debian/Ubuntu 包名为 `libsecret-tools`），并运行可用的 Secret Service。
-
-GitHub Release 同时提供 `agy-auth-linux-aarch64.tar.gz`，解压后可直接运行。
-
-或者使用 `npx` 临时免安装执行：
+或者使用 Cargo 从源码安装：
 
 ```bash
-npx agy-auth list
+cargo install --git https://github.com/dwdcth/agy-auth --locked
 ```
+
+支持的平台：macOS x64 / ARM64、Windows x64、Linux x64 / ARM64 / LoongArch64（glibc）。
+不适用于 Android / Termux 或 Alpine / musl。
+
+Linux 切换系统凭据的行为：存在可用的 Secret Service 时优先使用（需要 `secret-tool`，
+Debian/Ubuntu 包名为 `libsecret-tools`）；headless 环境没有 Secret Service 时，自动
+写入 AGY CLI 的 token 文件（`~/.gemini/antigravity-cli/antigravity-oauth-token`），
+无需安装额外依赖。注意：正在运行的 `agy` 会话会缓存旧凭据，切换后需重启会话生效。
 
 ---
 

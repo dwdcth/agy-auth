@@ -9,33 +9,61 @@ permissions:
   contents: write
 
 jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Run tests
+        run: cargo test --locked
+
   build:
     name: Build - ${{ matrix.target }}
+    needs: test
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
+          # Linux targets are cross compiled with cargo-zigbuild
+          # (loongarch64 has no native GitHub runner).
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             bin_path: target/x86_64-unknown-linux-gnu/release/agy-auth
             asset_name: agy-auth-linux-x86_64
-          - os: ubuntu-24.04-arm
+            archive: tar.gz
+          - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             bin_path: target/aarch64-unknown-linux-gnu/release/agy-auth
             asset_name: agy-auth-linux-aarch64
+            archive: tar.gz
+          - os: ubuntu-latest
+            target: loongarch64-unknown-linux-gnu
+            bin_path: target/loongarch64-unknown-linux-gnu/release/agy-auth
+            asset_name: agy-auth-linux-loongarch64
+            archive: tar.gz
+          # macOS runner builds both architectures natively.
           - os: macos-latest
             target: x86_64-apple-darwin
             bin_path: target/x86_64-apple-darwin/release/agy-auth
             asset_name: agy-auth-macos-x86_64
+            archive: tar.gz
           - os: macos-latest
             target: aarch64-apple-darwin
             bin_path: target/aarch64-apple-darwin/release/agy-auth
             asset_name: agy-auth-macos-aarch64
+            archive: tar.gz
+          # Windows MSVC has no zig cross story; build natively.
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             bin_path: target/x86_64-pc-windows-msvc/release/agy-auth.exe
-            asset_name: agy-auth-windows-x86_64.exe
+            asset_name: agy-auth-windows-x86_64
+            archive: zip
 
     steps:
       - name: Checkout source code
@@ -46,17 +74,30 @@ jobs:
         with:
           target: ${{ matrix.target }}
 
-      - name: Build Release Binary
-        run: cargo build --release --target ${{ matrix.target }}
+      - name: Install Zig
+        if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'loongarch64-unknown-linux-gnu'
+        uses: mlugg/setup-zig@v1
 
-      - name: Verify Linux ARM64 Binary
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          cargo test --locked --target ${{ matrix.target }}
-          ${{ matrix.bin_path }} --version
+      - name: Install cargo-zigbuild
+        if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'loongarch64-unknown-linux-gnu'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: Build Release Binary (native)
+        if: matrix.os != 'ubuntu-latest'
+        run: cargo build --locked --release --target ${{ matrix.target }}
+
+      - name: Build Release Binary (zig cross)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo zigbuild --locked --release --target ${{ matrix.target }}
+
+      - name: Verify Binary
+        if: matrix.os != 'windows-latest'
+        run: file ${{ matrix.bin_path }}
 
       - name: Prepare Assets (Unix)
-        if: matrix.os != 'windows-latest'
+        if: matrix.archive == 'tar.gz'
         run: |
           mkdir -p dist
           cp ${{ matrix.bin_path }} dist/${{ matrix.asset_name }}
@@ -64,19 +105,18 @@ jobs:
           tar -czf ../${{ matrix.asset_name }}.tar.gz ${{ matrix.asset_name }}
 
       - name: Prepare Assets (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: bash
+        if: matrix.archive == 'zip'
+        shell: pwsh
         run: |
-          mkdir -p dist
-          cp ${{ matrix.bin_path }} dist/${{ matrix.asset_name }}
-          cd dist
-          tar -czf ../${{ matrix.asset_name }}.tar.gz ${{ matrix.asset_name }}
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item ${{ matrix.bin_path }} dist/${{ matrix.asset_name }}.exe
+          Compress-Archive -Path dist/${{ matrix.asset_name }}.exe -DestinationPath ${{ matrix.asset_name }}.zip
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: bin-${{ matrix.target }}
-          path: ${{ matrix.asset_name }}.tar.gz
+          path: ${{ matrix.asset_name }}.${{ matrix.archive }}
 
   release:
     name: Create GitHub Release
@@ -94,18 +134,13 @@ jobs:
       - name: Flatten Artifacts Structure
         run: |
           mkdir -p dist
-          find artifacts -name "*.tar.gz" -exec cp {} dist/ \;
+          find artifacts \( -name "*.tar.gz" -o -name "*.zip" \) -exec cp {} dist/ \;
           ls -la dist/
-
-      - name: Generate Release Notes
-        id: release_notes
-        run: |
-          echo "Release created automatically by GitHub Actions workflow." > release_notes.md
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.tar.gz
-          body_path: release_notes.md
+          files: dist/*
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
