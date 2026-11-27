@@ -191,6 +191,19 @@ async fn import_from_refresh_token(
 
     let mut account = storage::upsert_account(email, name, token)?;
     apply_metadata(&mut account, tags, notes)?;
+
+    // Best-effort tier detection for newly imported accounts. The token was
+    // just refreshed, so this is a single extra call. Accounts that already
+    // carry a detected tier keep it (upsert preserves existing fields).
+    if account.tier.is_none() {
+        if let Ok(tier_info) = oauth::fetch_tier(&account.token.access_token).await {
+            account.tier = Some(tier_info.tier);
+            account.tier_name = tier_info.name;
+            account.tier_updated_at = Some(chrono::Utc::now().timestamp());
+            let _ = storage::save_account(&account);
+        }
+    }
+
     Ok(account)
 }
 

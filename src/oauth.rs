@@ -23,6 +23,16 @@ const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const USERINFO_URL: &str = "https://www.googleapis.com/oauth2/v2/userinfo";
 const AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const DEFAULT_OAUTH_CLIENT_KEY: &str = "antigravity_enterprise";
+const LOAD_CODE_ASSIST_URL: &str =
+    "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
+
+#[derive(Debug, Clone)]
+pub struct TierInfo {
+    /// Canonical tier: free | pro | ultra | teams | enterprise | raw id
+    pub tier: String,
+    /// Display name from the API, e.g. "Google AI Pro"
+    pub name: Option<String>,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TokenResponse {
@@ -176,6 +186,96 @@ pub async fn get_user_info(access_token: &str) -> Result<UserInfo, String> {
         let error_text = response.text().await.unwrap_or_default();
         Err(format!("Failed to retrieve user info: {}", error_text))
     }
+}
+
+/// Antigravity client identity: without this User-Agent the loadCodeAssist
+/// endpoint treats the token as a legacy Cloud Code client and hides the
+/// Antigravity tiers (UNSUPPORTED_CLIENT).
+fn antigravity_user_agent() -> String {
+    #[cfg(target_os = "macos")]
+    let os = "darwin";
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let os = "linux";
+    #[cfg(target_os = "windows")]
+    let os = "windows";
+
+    #[cfg(target_arch = "aarch64")]
+    let arch = "arm64";
+    #[cfg(not(target_arch = "aarch64"))]
+    let arch = "amd64";
+
+    format!("antigravity/hub/2.9.1 {}/{}", os, arch)
+}
+
+/// Fetch the account's Antigravity subscription tier via the Cloud Code
+/// internal API. Same call the IDE makes on startup; read-only.
+pub async fn fetch_tier(access_token: &str) -> Result<TierInfo, String> {
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct TierEntry {
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
+    }
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct LoadCodeAssistResponse {
+        #[serde(default)]
+        current_tier: Option<TierEntry>,
+        #[serde(default)]
+        paid_tier: Option<TierEntry>,
+    }
+
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({ "metadata": { "ideType": "ANTIGRAVITY" } });
+    let response = client
+        .post(LOAD_CODE_ASSIST_URL)
+        .header("User-Agent", antigravity_user_agent())
+        .bearer_auth(access_token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Tier request failed: {}", e))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let error_text = response.text().await.unwrap_or_default();
+        return Err(format!("Tier request failed ({}): {}", status, error_text));
+    }
+
+    let parsed = response
+        .json::<LoadCodeAssistResponse>()
+        .await
+        .map_err(|e| format!("Failed to parse tier response: {}", e))?;
+
+    // Prefer paidTier (the effective subscription) over currentTier metadata.
+    let (raw_id, name) = match parsed
+        .paid_tier
+        .as_ref()
+        .filter(|t| t.id.as_deref().map(str::trim).unwrap_or("").len() > 0)
+    {
+        Some(paid) => (
+            paid.id.clone().unwrap_or_default(),
+            paid.name.clone().filter(|s| !s.trim().is_empty()),
+        ),
+        None => match parsed.current_tier.as_ref().and_then(|t| t.id.clone()) {
+            Some(id) => (
+                id,
+                parsed
+                    .current_tier
+                    .as_ref()
+                    .and_then(|t| t.name.clone())
+                    .filter(|s| !s.trim().is_empty()),
+            ),
+            None => ("free-tier".to_string(), None),
+        },
+    };
+
+    Ok(TierInfo {
+        tier: super::models::canonicalize_tier(&raw_id),
+        name,
+    })
 }
 
 pub async fn ensure_fresh_token(

@@ -8,12 +8,21 @@ mod import;
 mod google_accounts;
 
 use clap::{Parser, Subcommand};
-use models::{Account, TokenData};
 use colored::*;
+use models::{Account, TokenData};
 use std::path::PathBuf;
 use std::process::Command;
 use tabled::{Table, Tabled};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+fn color_tier(tier: &str) -> colored::ColoredString {
+    match tier {
+        "ultra" => tier.bright_magenta().bold(),
+        "pro" => tier.bright_cyan(),
+        "free" => tier.white(),
+        other => other.normal(),
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "agy-auth")]
@@ -63,20 +72,53 @@ enum Commands {
         /// The account ID or Email to delete
         account: String,
     },
+
+    /// Add a tag to one or more accounts
+    Tag {
+        /// Apply the tag to ALL accounts
+        #[arg(long, conflicts_with = "ids")]
+        all: bool,
+
+        /// Comma-separated account IDs (row numbers from `agy-auth list`), e.g. 1,3,5
+        #[arg(long = "id", value_delimiter = ',', required_unless_present = "all")]
+        ids: Vec<usize>,
+
+        /// The tag to add; an empty value clears all tags instead
+        tag: String,
+    },
+
+    /// Detect or set the subscription tier (free / pro / ultra) of accounts
+    #[command(alias = "plan")]
+    Tier {
+        /// The account ID or Email. Omit to refresh ALL accounts.
+        account: Option<String>,
+
+        /// Manually set the tier instead of auto-detecting (e.g. free, pro, ultra)
+        #[arg(long, short = 's', requires = "account")]
+        set: Option<String>,
+
+        /// Clear the stored tier of the account
+        #[arg(long, requires = "account", conflicts_with = "set")]
+        clear: bool,
+    },
 }
 
 #[derive(Tabled)]
 struct AccountDisplay {
+    #[tabled(rename = "ID")]
+    num: usize,
     #[tabled(rename = "Active")]
     active: String,
-    #[tabled(rename = "ID")]
-    id: String,
-    #[tabled(rename = "Email")]
-    email: String,
     #[tabled(rename = "Name")]
     name: String,
+    #[tabled(rename = "Email")]
+    email: String,
+    #[tabled(rename = "Tier")]
+    tier: String,
     #[tabled(rename = "Tags")]
     tags: String,
+    #[tabled(rename = "UUID")]
+    uuid: String,
 }
 
 #[tokio::main]
@@ -111,6 +153,20 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Delete { account } => {
             if let Err(e) = delete_account(&account).await {
+                eprintln!("{} {}", "Error:".red(), e);
+            }
+        }
+        Commands::Tag { all, ids, tag } => {
+            if let Err(e) = tag_command(all, &ids, &tag) {
+                eprintln!("{} {}", "Error:".red(), e);
+            }
+        }
+        Commands::Tier {
+            account,
+            set,
+            clear,
+        } => {
+            if let Err(e) = tier_command(account.as_deref(), set.as_deref(), clear).await {
                 eprintln!("{} {}", "Error:".red(), e);
             }
         }
@@ -226,18 +282,21 @@ async fn list_accounts() -> anyhow::Result<()> {
 
     let display_list: Vec<AccountDisplay> = accounts
         .into_iter()
-        .map(|acc| {
+        .enumerate()
+        .map(|(idx, acc)| {
             let active = if Some(acc.id.clone()) == current_id {
                 "  *  ".green().bold().to_string()
             } else {
                 "".to_string()
             };
             AccountDisplay {
+                num: idx + 1,
                 active,
-                id: acc.id,
-                email: acc.email,
                 name: acc.name.unwrap_or_default(),
+                email: acc.email,
+                tier: acc.tier.as_deref().map(color_tier).map(|c| c.to_string()).unwrap_or_else(|| "-".to_string()),
                 tags: acc.tags.join(", "),
+                uuid: acc.id,
             }
         })
         .collect();
@@ -279,11 +338,231 @@ async fn add_account(refresh_token: Option<String>) -> anyhow::Result<()> {
     let email = user_info.email.clone();
     let display_name = user_info.get_display_name();
 
-    storage::upsert_account(email.clone(), display_name, token_data)
+    let account = storage::upsert_account(email.clone(), display_name, token_data)
         .map_err(|e| anyhow::anyhow!("Failed to register account: {}", e))?;
 
     println!("Successfully registered account: {}", email.bright_green());
+
+    // Best-effort tier detection for the freshly added account.
+    if let Ok(mut saved) = storage::load_account(&account.id) {
+        match refresh_account_tier(&mut saved).await {
+            Ok(()) => println!(
+                "Detected tier: {}",
+                color_tier(saved.tier.as_deref().unwrap_or("-"))
+            ),
+            Err(e) => println!("{} Tier detection skipped: {}", "Note:".yellow(), e),
+        }
+    }
+
     println!("Use `agy-auth switch {}` to switch to this account.", email.cyan());
+
+    Ok(())
+}
+
+fn find_account<'a>(accounts: &'a [Account], reference: &str) -> Option<&'a Account> {
+    accounts
+        .iter()
+        .find(|acc| acc.id == reference || acc.email.eq_ignore_ascii_case(reference))
+}
+
+/// Refresh the account token if needed, query its subscription tier, and
+/// persist both to the account file.
+pub(crate) async fn refresh_account_tier(account: &mut Account) -> Result<(), String> {
+    let fresh_token = oauth::ensure_fresh_token(&account.token).await?;
+    if fresh_token.access_token != account.token.access_token {
+        account.token = fresh_token;
+    }
+
+    let tier_info = oauth::fetch_tier(&account.token.access_token).await?;
+    account.tier = Some(tier_info.tier);
+    account.tier_name = tier_info.name;
+    account.tier_updated_at = Some(chrono::Utc::now().timestamp());
+
+    storage::save_account(account)
+}
+
+fn tier_display(account: &Account) -> String {
+    match (&account.tier, &account.tier_name) {
+        (Some(t), Some(n)) => format!("{} ({})", color_tier(t), n),
+        (Some(t), None) => color_tier(t).to_string(),
+        _ => "-".to_string(),
+    }
+}
+
+fn tag_command(all: bool, ids: &[usize], tag: &str) -> anyhow::Result<()> {
+    let accounts = storage::list_accounts().map_err(|e| anyhow::anyhow!(e))?;
+    if accounts.is_empty() {
+        return Err(anyhow::anyhow!(
+            "No registered accounts found. Please add an account using `agy-auth add` first."
+        ));
+    }
+
+    // Row numbers shown by `agy-auth list`: enumerate(list_accounts order) + 1.
+    let rows: std::collections::BTreeSet<usize> = if all {
+        (1..=accounts.len()).collect()
+    } else {
+        let mut rows = std::collections::BTreeSet::new();
+        for num in ids {
+            if *num == 0 || *num > accounts.len() {
+                return Err(anyhow::anyhow!(
+                    "Invalid account ID {}: valid range is 1-{} (see `agy-auth list`)",
+                    num,
+                    accounts.len()
+                ));
+            }
+            rows.insert(*num);
+        }
+        rows
+    };
+
+    // An empty tag clears all tags of the target accounts.
+    let clearing = tag.trim().is_empty();
+
+    let mut changed = 0usize;
+    let mut unchanged = 0usize;
+    for num in rows {
+        let mut account = accounts[num - 1].clone();
+        if clearing {
+            if account.tags.is_empty() {
+                println!("  = {} (no tags)", account.email);
+                unchanged += 1;
+                continue;
+            }
+            account.tags.clear();
+            storage::save_account(&account).map_err(|e| anyhow::anyhow!(e))?;
+            println!("  - {} (cleared)", account.email.bright_green());
+            changed += 1;
+        } else {
+            let tag = tag.trim();
+            if account.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
+                println!("  = {} (already tagged)", account.email);
+                unchanged += 1;
+                continue;
+            }
+            account.tags.push(tag.to_string());
+            storage::save_account(&account).map_err(|e| anyhow::anyhow!(e))?;
+            println!("  + {} [{}]", account.email.bright_green(), tag);
+            changed += 1;
+        }
+    }
+
+    if clearing {
+        println!(
+            "{} Cleared tags on {} account(s) ({} had none).",
+            "Success:".green().bold(),
+            changed,
+            unchanged
+        );
+    } else {
+        println!(
+            "{} Tagged {} account(s) with '{}' ({} already had it).",
+            "Success:".green().bold(),
+            changed,
+            tag.trim(),
+            unchanged
+        );
+    }
+
+    Ok(())
+}
+
+async fn tier_command(
+    account_ref: Option<&str>,
+    set: Option<&str>,
+    clear: bool,
+) -> anyhow::Result<()> {
+    let accounts = storage::list_accounts().map_err(|e| anyhow::anyhow!(e))?;
+    if accounts.is_empty() {
+        return Err(anyhow::anyhow!(
+            "No registered accounts found. Please add an account using `agy-auth add` first."
+        ));
+    }
+
+    if let Some(value) = set {
+        let account_ref = account_ref.expect("--set requires an account");
+        let target = find_account(&accounts, account_ref)
+            .ok_or_else(|| anyhow::anyhow!("Account not found matching: '{}'", account_ref))?;
+
+        let mut account = target.clone();
+        account.tier = Some(models::canonicalize_tier(value));
+        account.tier_name = None;
+        account.tier_updated_at = Some(chrono::Utc::now().timestamp());
+        storage::save_account(&account).map_err(|e| anyhow::anyhow!(e))?;
+        println!(
+            "{} Set tier of {} to {}",
+            "Success:".green().bold(),
+            account.email.bright_green(),
+            color_tier(account.tier.as_deref().unwrap_or("-"))
+        );
+        return Ok(());
+    }
+
+    if clear {
+        let account_ref = account_ref.expect("--clear requires an account");
+        let target = find_account(&accounts, account_ref)
+            .ok_or_else(|| anyhow::anyhow!("Account not found matching: '{}'", account_ref))?;
+
+        let mut account = target.clone();
+        account.tier = None;
+        account.tier_name = None;
+        account.tier_updated_at = None;
+        storage::save_account(&account).map_err(|e| anyhow::anyhow!(e))?;
+        println!(
+            "{} Cleared tier of {}",
+            "Success:".green().bold(),
+            account.email.bright_green()
+        );
+        return Ok(());
+    }
+
+    // Auto-detect: single account or all of them.
+    let targets: Vec<Account> = match account_ref {
+        Some(r) => {
+            let target = find_account(&accounts, r)
+                .ok_or_else(|| anyhow::anyhow!("Account not found matching: '{}'", r))?;
+            vec![target.clone()]
+        }
+        None => accounts,
+    };
+
+    let total = targets.len();
+    println!(
+        "Detecting subscription tier for {} account(s)...",
+        total
+    );
+    let mut updated = 0usize;
+    let mut failed = 0usize;
+    for mut account in targets {
+        match refresh_account_tier(&mut account).await {
+            Ok(()) => {
+                let name_suffix = account
+                    .tier_name
+                    .as_deref()
+                    .map(|n| format!(" ({})", n))
+                    .unwrap_or_default();
+                println!(
+                    "  {} -> {}{}",
+                    account.email.bright_green(),
+                    color_tier(account.tier.as_deref().unwrap_or("-")),
+                    name_suffix.dimmed()
+                );
+                updated += 1;
+            }
+            Err(e) => {
+                println!("  {} -> {}", account.email.yellow(), format!("failed: {}", e).red());
+                failed += 1;
+            }
+        }
+    }
+
+    if total > 1 {
+        println!(
+            "{} {} updated, {} failed.",
+            "Done:".green().bold(),
+            updated,
+            failed
+        );
+    }
 
     Ok(())
 }
@@ -425,6 +704,9 @@ async fn switch_account(account_ref: Option<&str>) -> anyhow::Result<()> {
                     label = format!("{} [Active]", label);
                     default_idx = idx;
                 }
+                if let Some(tier) = &acc.tier {
+                    label = format!("{} [{}]", label, color_tier(tier));
+                }
                 items.push(label);
             }
 
@@ -503,7 +785,8 @@ async fn show_current_account() -> anyhow::Result<()> {
         println!("Currently active AGY account:");
         println!("  {:<10} {}", "Email:".bright_blue(), account.email);
         println!("  {:<10} {}", "ID:".bright_blue(), account.id);
-        println!("  {:<10} {}", "Name:".bright_blue(), account.name.unwrap_or_default());
+        println!("  {:<10} {}", "Name:".bright_blue(), account.name.as_deref().unwrap_or_default());
+        println!("  {:<10} {}", "Tier:".bright_blue(), tier_display(&account));
         println!("  {:<10} {}", "Tags:".bright_blue(), account.tags.join(", "));
         println!("  {:<10} {}", "Created:".bright_blue(), chrono::DateTime::from_timestamp(account.created_at, 0).unwrap_or_default().to_rfc3339());
         println!("  {:<10} {}", "Last Used:".bright_blue(), chrono::DateTime::from_timestamp(account.last_used, 0).unwrap_or_default().to_rfc3339());

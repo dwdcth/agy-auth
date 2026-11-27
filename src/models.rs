@@ -62,6 +62,12 @@ pub struct Account {
     pub notes: Option<String>,
     pub token: TokenData,
     pub quota: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier_updated_at: Option<i64>,
     #[serde(default)]
     pub disabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -83,6 +89,9 @@ impl Account {
             notes: None,
             token,
             quota: None,
+            tier: None,
+            tier_name: None,
+            tier_updated_at: None,
             disabled: false,
             disabled_reason: None,
             disabled_at: None,
@@ -93,6 +102,28 @@ impl Account {
 
     pub fn update_last_used(&mut self) {
         self.last_used = chrono::Utc::now().timestamp();
+    }
+}
+
+/// Normalize a raw tier id (e.g. "g1-pro-tier", "free-tier") to a canonical
+/// lowercase level. Substring matching keeps working when Google renames ids.
+pub fn canonicalize_tier(id: &str) -> String {
+    let lower = id.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return "free".to_string();
+    }
+    if lower.contains("ultra") {
+        "ultra".to_string()
+    } else if lower.contains("pro") {
+        "pro".to_string()
+    } else if lower.contains("team") {
+        "teams".to_string()
+    } else if lower.contains("enterprise") {
+        "enterprise".to_string()
+    } else if lower.contains("free") || lower.contains("starter") {
+        "free".to_string()
+    } else {
+        lower
     }
 }
 

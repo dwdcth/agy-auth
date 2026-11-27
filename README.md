@@ -70,6 +70,42 @@ Debian/Ubuntu 包名为 `libsecret-tools`）；headless 环境没有 Secret Serv
   agy-auth current  # 或者 agy-auth whoami
   ```
 
+* **给账号打标签**：
+  ```bash
+  # 给全部账号打 tag
+  agy-auth tag --all "xxx"
+
+  # 给指定账号打 tag，序号来自 `agy-auth list` 的 ID 列（逗号分隔）
+  agy-auth tag --id 1,3,5 "xxx"
+
+  # 空 tag = 清除目标账号的全部标签
+  agy-auth tag --all ""
+  agy-auth tag --id 1,3 ""
+  ```
+  tag 追加到账号已有标签里并自动去重（大小写不敏感）；`--id` 的序号
+  对应 `list` 显示的行号，账号增删后行号会变，使用前先 `agy-auth list`
+  确认。
+
+* **查询 / 设置账号订阅级别**（free / pro / ultra）：
+  ```bash
+  # 自动探测所有账号的订阅级别（刷新 token 并调用 Google API）
+  agy-auth tier  # 或者 agy-auth plan
+
+  # 只探测指定账号
+  agy-auth tier <account_email_or_id>
+
+  # 手动设置（离线可用，值为 free/pro/ultra 等）
+  agy-auth tier <account_email_or_id> --set ultra
+
+  # 清除已存的级别
+  agy-auth tier <account_email_or_id> --clear
+  ```
+  探测走 `cloudcode-pa.googleapis.com` 的 `loadCodeAssist` 端点（与
+  Antigravity IDE 启动时的查询一致，只读）：优先取 `paidTier`，例如
+  `g1-pro-tier` → `pro`、`free-tier` → `free`。结果持久化在账号文件里，
+  `list` 的 Tier 列、`current`、交互式 `switch` 选择列表都会显示；
+  `add` / `import` 新账号时会自动探测一次（失败不影响添加）。
+
 * **删除账号**：
   ```bash
   agy-auth delete <account_email_or_id> # 或者 agy-auth remove <email_or_id>
